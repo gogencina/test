@@ -1,0 +1,491 @@
+import sys
+import sqlite3
+import json
+
+from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QPushButton, QComboBox, QListWidget, QTableWidget
+from PyQt5.QtWidgets import QDialog, QLabel, QLineEdit, QGridLayout, QPushButton, QComboBox, QCheckBox, QGroupBox, QSizePolicy
+from PyQt5.QtWidgets import QVBoxLayout, QHBoxLayout, QFormLayout, QSpinBox
+from PyQt5.QtCore import Qt
+from PyQt5.QtWidgets import QListWidgetItem
+
+def get_parent_dialog(widget):
+    while widget:
+        if isinstance(widget, AddSiteDialog):
+            return widget
+        widget = widget.parent()
+    return None
+
+class ScraperApp(QMainWindow):
+    def __init__(self):
+        super().__init__()
+
+        # SQLite Database Connection
+        self.conn = sqlite3.connect('sites.db')
+        self.cursor = self.conn.cursor()
+        self.create_sites_table()
+
+        self.cursor.execute('''CREATE TABLE IF NOT EXISTS sites
+                          (name TEXT, url TEXT, price_selector TEXT, display_format TEXT)''')
+        self.conn.commit()
+
+        
+        # Main window settings
+        self.setWindowTitle("Web Scraper Tool")
+        self.setGeometry(100, 100, 1200, 800)
+
+        # Central widget and layout
+        self.central_widget = QWidget(self)
+        self.setCentralWidget(self.central_widget)
+        main_layout = QVBoxLayout(self.central_widget)
+
+
+        # Top Left: Dropdown and Buttons
+        self.saved_sites_dropdown = QComboBox(self)
+        self.saved_sites_dropdown.setFixedWidth(300)  # Making dropdown larger
+        self.add_site_btn = QPushButton("Add Site", self)
+        self.add_site_btn.setFixedWidth(100)  # Making button smaller
+        self.edit_site_btn = QPushButton("Edit Site", self)
+        self.edit_site_btn.setFixedWidth(100)  # Making button smaller
+        self.delete_site_btn = QPushButton("Delete Site", self)
+        self.delete_site_btn.setFixedWidth(100)  # Making button smaller
+        self.add_to_queue_btn = QPushButton("Add to Queue", self)
+        self.add_to_queue_btn.setFixedWidth(100)  # Making button smaller
+
+        left_top_layout = QHBoxLayout()
+        left_top_layout.addWidget(self.saved_sites_dropdown)
+        left_top_layout.addWidget(self.add_site_btn)
+        left_top_layout.addWidget(self.edit_site_btn)
+        left_top_layout.addWidget(self.delete_site_btn)
+        left_top_layout.addWidget(self.add_to_queue_btn)
+
+        left_layout = QVBoxLayout()
+        left_layout.addLayout(left_top_layout)
+        left_layout.addStretch(1)  # Pushing the elements to the top
+
+        # Top Right: Queued Sites List
+        self.queued_sites_list = QListWidget(self)
+        self.start_scrape_btn = QPushButton("Start Scrape", self)
+        self.check_price_btn = QPushButton("Check Price", self)
+        self.clear_list_btn = QPushButton("Clear List", self)
+
+        right_layout = QVBoxLayout()
+        right_layout.addWidget(self.queued_sites_list)
+        right_layout.addWidget(self.start_scrape_btn)
+        right_layout.addWidget(self.check_price_btn)
+        right_layout.addWidget(self.clear_list_btn)
+
+        top_layout = QHBoxLayout()
+        top_layout.addLayout(left_layout, 2)  # Giving more space to the left side
+        top_layout.addLayout(right_layout, 1)
+        main_layout.addLayout(top_layout)
+
+        # Bottom: Data Display Table
+        self.data_table = QTableWidget(self)
+        main_layout.addWidget(self.data_table)
+
+        # Connect buttons to their respective functions
+        self.add_to_queue_btn.clicked.connect(self.add_site_to_queue)
+        self.add_site_btn.clicked.connect(self.open_add_site_dialog)
+        
+        # Connect the "Delete Site" button to its function
+        self.delete_site_btn.clicked.connect(self.delete_saved_site)
+
+        # List to store saved sites
+        self.load_saved_sites()
+        self.saved_sites = []
+
+
+
+    def open_add_site_dialog(self):
+        add_site_dialog = AddSiteDialog(self.cursor, self.conn, self)
+        add_site_dialog.exec_()
+        self.populate_saved_sites()
+
+    def populate_saved_sites(self):
+        """Populate the saved sites dropdown with saved site names."""
+        self.saved_sites_dropdown.clear()
+        for site in self.saved_sites:
+            if isinstance(site, dict) and "name" in site:
+                self.saved_sites_dropdown.addItem(site["name"])
+
+    def add_site_to_queue(self):
+        """Add the selected site to the queue."""
+        selected_site_name = self.saved_sites_dropdown.currentText()
+        if selected_site_name and selected_site_name not in [self.queued_sites_list.item(i).text() for i in range(self.queued_sites_list.count())]:
+            self.queued_sites_list.addItem(selected_site_name)
+
+    def delete_saved_site(self):
+        """Delete the selected site from saved sites."""
+        selected_site_name = self.saved_sites_dropdown.currentText()
+        if selected_site_name:
+            # Remove the site from saved_sites
+            self.saved_sites = [site for site in self.saved_sites if site["name"] != selected_site_name]
+            
+            # Update the dropdown
+            self.update_saved_sites_dropdown()
+            
+            # Remove the site from queued_sites_list if present
+            items = self.queued_sites_list.findItems(selected_site_name, Qt.MatchExactly)
+            for item in items:
+                self.queued_sites_list.takeItem(self.queued_sites_list.row(item))
+
+    def update_saved_sites_dropdown(self):
+        """Update the dropdown with the saved sites."""
+        self.saved_sites_dropdown.clear()
+        for site in self.saved_sites:
+            self.saved_sites_dropdown.addItem(site["name"])
+
+    def create_sites_table(self):
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS sites (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                url TEXT NOT NULL,
+                price_selector TEXT,
+                display_format TEXT,
+                configure_from_to BOOLEAN,
+                general_interactions TEXT,
+                from_interactions TEXT,
+                to_interactions TEXT
+            )
+        ''')
+        self.conn.commit()
+
+    def load_saved_sites(self):
+        """Load the saved sites from the SQLite database."""
+        self.saved_sites = []  # Reset the saved_sites list
+
+        # Fetch all records from the sites table
+        self.cursor.execute("SELECT * FROM sites")
+        rows = self.cursor.fetchall()
+
+        for row in rows:
+            site_info = {
+                "id": row[0],
+                "name": row[1],
+                "url": row[2],
+                "price_selector": row[3],
+                "display_format": row[4],
+                "configure_from_to": bool(row[5]),
+                "general_interactions": row[6],
+                "from_interactions": row[7],
+                "to_interactions": row[8]
+            }
+            self.saved_sites.append(site_info)
+
+        # Now, you can use the self.saved_sites list to populate any UI elements
+        self.update_saved_sites_dropdown()
+
+    def closeEvent(self, event):
+        """This method is called when the window is about to close."""
+        self.conn.close()
+        event.accept()
+
+
+
+class InteractionWidget(QWidget):
+    def __init__(self, parent=None, target_list=None):
+        super().__init__(parent)
+        
+        interaction_layout = QHBoxLayout(self)
+
+        # Drag Handle
+        drag_handle = QLabel("≡", self)
+        drag_handle.setStyleSheet("font-size: 16px; padding-right: 10px;")
+        interaction_layout.addWidget(drag_handle)
+
+        # Interaction type dropdown
+        interaction_type_dropdown = QComboBox()
+        interaction_type_dropdown.addItems(["Dropdown", "Checkbox", "Field", "Radio Button", "Button", "Slider", "Tab", "Modal/Pop-up", "Collapsible Section/Accordion"])
+        interaction_layout.addWidget(interaction_type_dropdown)
+
+        # CSS Selector Label
+        css_selector_label = QLabel("CSS Selector:")
+        interaction_layout.addWidget(css_selector_label)
+
+        # CSS Selector
+        css_selector_field = QLineEdit()
+        interaction_layout.addWidget(css_selector_field)
+
+        # Value Label
+        value_label = QLabel("Value:")
+        interaction_layout.addWidget(value_label)
+
+        # Value Field (for interactions that require a value, like sliders or fields)
+        value_field = QLineEdit()
+        value_field.setObjectName("ValueField")
+        interaction_layout.addWidget(value_field)
+
+        # Remove interaction button
+        remove_btn = QPushButton("Remove")
+        remove_btn.clicked.connect(lambda: get_parent_dialog(self).remove_interaction(self))
+        interaction_layout.addWidget(remove_btn)
+
+        # Adjust the visibility of widgets based on the interaction type
+        def adjust_buttons_based_on_type(index):
+            if interaction_type_dropdown.currentText() in ["Field", "Slider"]:
+                value_label.show()
+                value_field.show()
+            else:
+                value_label.hide()
+                value_field.hide()
+
+        interaction_type_dropdown.currentIndexChanged.connect(adjust_buttons_based_on_type)
+        adjust_buttons_based_on_type(0)  # Call once to set the initial state
+
+        self.setLayout(interaction_layout)
+
+
+
+class AddSiteDialog(QDialog):
+    def __init__(self, cursor, conn, parent=None):
+        super().__init__(parent)
+        self.cursor = cursor
+        self.conn = conn
+
+
+        # Window settings
+        self.setWindowTitle("Add Site")
+        self.setGeometry(200, 200, 1000, 800)
+
+        # Layout
+        layout = QGridLayout(self)
+
+        # Name and URL fields
+        self.name_label = QLabel("Name:")
+        self.name_field = QLineEdit(self)
+        layout.addWidget(self.name_label, 0, 0)
+        layout.addWidget(self.name_field, 0, 1)
+
+        self.url_label = QLabel("URL:")
+        self.url_field = QLineEdit(self)
+        layout.addWidget(self.url_label, 1, 0)
+        layout.addWidget(self.url_field, 1, 1)
+
+        # CSS Selector for price
+        self.price_selector_label = QLabel("Price CSS Selector:")
+        self.price_selector_field = QLineEdit(self)
+        layout.addWidget(self.price_selector_label, 2, 0)
+        layout.addWidget(self.price_selector_field, 2, 1)
+
+        # Data display format dropdown
+        self.display_format_label = QLabel("Display Format:")
+        self.display_format_dropdown = QComboBox(self)
+        self.display_format_dropdown.addItems(["Format 1", "Format 2"])  # Placeholder formats
+        layout.addWidget(self.display_format_label, 3, 0)
+        layout.addWidget(self.display_format_dropdown, 3, 1)
+
+        # Configure 'From' and 'To' Selectors Checkbox
+        self.configure_from_to_checkbox = QCheckBox("Configure 'From' and 'To' Selectors", self)
+        self.configure_from_to_checkbox.stateChanged.connect(self.toggle_from_to_configuration)
+        layout.addWidget(self.configure_from_to_checkbox, 4, 0, 1, 2)
+
+        # General Interactions Area
+        self.general_interactions_list = QListWidget(self)
+        self.general_interactions_list.setDragDropMode(QListWidget.InternalMove)  # Enable drag-and-drop
+        self.general_interactions_list.setDefaultDropAction(Qt.MoveAction)  # Set default drop action to move
+        layout.addWidget(self.general_interactions_list, 5, 0, 1, 2)
+
+        self.general_add_btn = QPushButton("Add Interaction", self)
+        self.general_add_btn.clicked.connect(self.add_general_interaction)  # Connect to the new method
+        layout.addWidget(self.general_add_btn, 6, 0, 1, 2)
+
+        # From Selectors Section
+        self.from_groupbox = QGroupBox("From Selectors", self)
+        self.from_layout = QVBoxLayout(self.from_groupbox)
+        self.from_add_btn = QPushButton("Add Interaction", self)
+        self.from_add_btn.clicked.connect(self.add_from_interaction)  # Connect to the new method
+        self.from_layout.addWidget(self.from_add_btn)
+
+        self.from_interactions_list = QListWidget(self)
+        self.from_interactions_list.setDragDropMode(QListWidget.InternalMove)  # Enable drag-and-drop for "from" interactions
+        self.from_interactions_list.setDefaultDropAction(Qt.MoveAction)  # Set default drop action to move
+        self.from_layout.addWidget(self.from_interactions_list)
+        layout.addWidget(self.from_groupbox, 7, 0, 1, 2)
+
+        # To Selectors Section
+        self.to_groupbox = QGroupBox("To Selectors", self)
+        self.to_layout = QVBoxLayout(self.to_groupbox)
+        self.to_add_btn = QPushButton("Add Interaction", self)
+        self.to_add_btn.clicked.connect(self.add_to_interaction)  # Connect to the new method
+        self.to_layout.addWidget(self.to_add_btn)
+
+        self.to_interactions_list = QListWidget(self)
+        self.to_interactions_list.setDragDropMode(QListWidget.InternalMove)  # Enable drag-and-drop for "to" interactions
+        self.to_interactions_list.setDefaultDropAction(Qt.MoveAction)  # Set default drop action to move
+        self.to_layout.addWidget(self.to_interactions_list)
+        layout.addWidget(self.to_groupbox, 8, 0, 1, 2)
+
+        self.from_groupbox.hide()
+        self.to_groupbox.hide()
+
+
+        # Save button
+        self.save_btn = QPushButton("Save", self)
+        self.save_btn.clicked.connect(self.save_site)
+        self.save_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        layout.addWidget(self.save_btn, 9, 0, 1, 2)
+
+        self.setLayout(layout)
+
+
+    def add_selector(self, target_layout):
+        selector_input = QLineEdit(self)
+        remove_btn = QPushButton("Remove", self)
+        remove_btn.clicked.connect(lambda: self.remove_selector(selector_input, remove_btn, target_layout))
+        target_layout.addWidget(selector_input)
+        target_layout.addWidget(remove_btn)
+
+    def remove_selector(self, selector_input, remove_btn, target_layout):
+        selector_input.deleteLater()
+        remove_btn.deleteLater()
+        target_layout.removeWidget(selector_input)
+        target_layout.removeWidget(remove_btn)
+
+    def toggle_from_to_configuration(self):
+        if self.configure_from_to_checkbox.isChecked():
+            self.from_groupbox.show()
+            self.to_groupbox.show()
+            self.general_interactions_list.hide()
+            self.general_add_btn.hide()
+        else:
+            self.from_groupbox.hide()
+            self.to_groupbox.hide()
+            self.general_interactions_list.show()
+            self.general_add_btn.show()
+
+
+    def add_general_interaction(self):
+        self._add_interaction_to_list(self.general_interactions_list)
+
+    def add_from_interaction(self):
+        self._add_interaction_to_list(self.from_interactions_list)
+
+    def add_to_interaction(self):
+        self._add_interaction_to_list(self.to_interactions_list)
+
+    # In the AddSiteDialog class:
+    def _add_interaction_to_list(self, target_list):
+        interaction_widget = InteractionWidget(self, target_list)
+        
+        interaction_item = QListWidgetItem()
+        target_list.addItem(interaction_item)
+        target_list.setItemWidget(interaction_item, interaction_widget)
+        interaction_item.setSizeHint(interaction_widget.sizeHint())
+
+
+    def adjust_interaction_ui(self, interaction_type):
+        # For now, just print the selected interaction type
+        # We'll expand this method to adjust the UI based on the interaction type
+        print(interaction_type)
+
+    def remove_interaction(self, interaction_widget):
+        # List of all interaction lists
+        interaction_lists = [self.general_interactions_list, self.from_interactions_list, self.to_interactions_list]
+
+        # Find the QListWidgetItem associated with the InteractionWidget
+        item_to_remove = None
+        target_list = None
+        for interaction_list in interaction_lists:
+            for i in range(interaction_list.count()):
+                item = interaction_list.item(i)
+                if interaction_list.itemWidget(item) == interaction_widget:
+                    item_to_remove = item
+                    target_list = interaction_list
+                    break
+            if item_to_remove:
+                break
+
+        if item_to_remove and target_list:
+            row = target_list.row(item_to_remove)
+            item = target_list.takeItem(row)
+            del item
+
+    def save_site(self):
+        """Save the site and its settings."""
+        site_name = self.name_field.text()
+        site_url = self.url_field.text()
+        price_selector = self.price_selector_field.text()
+        display_format = self.display_format_dropdown.currentText()
+        configure_from_to = self.configure_from_to_checkbox.isChecked()
+
+        # Gather interactions
+        interactions = []
+        for i in range(self.general_interactions_list.count()):
+            interaction_item = self.general_interactions_list.item(i)
+            interaction_widget = self.general_interactions_list.itemWidget(interaction_item)
+            interaction_type = interaction_widget.findChild(QComboBox).currentText()
+            css_selector = interaction_widget.findChild(QLineEdit).text()
+            value = interaction_widget.findChild(QLineEdit, "ValueField").text()
+            interactions.append({
+                "type": interaction_type,
+                "css_selector": css_selector,
+                "value": value
+            })
+
+        # Gather From and To selectors if configured
+        from_selectors = []
+        to_selectors = []
+
+        if configure_from_to:
+            for i in range(self.from_layout.count() - 1):  # -1 to exclude the add button
+                selector_widget = self.from_layout.itemAt(i).widget()
+                if isinstance(selector_widget, QLineEdit):
+                    from_selectors.append(selector_widget.text())
+
+            for i in range(self.to_layout.count() - 1):  # -1 to exclude the add button
+                selector_widget = self.to_layout.itemAt(i).widget()
+                if isinstance(selector_widget, QLineEdit):
+                    to_selectors.append(selector_widget.text())
+
+        site_info = {
+            "name": site_name,
+            "url": site_url,
+            "price_selector": price_selector,
+            "display_format": display_format,
+            "configure_from_to": configure_from_to,
+            "general_interactions": json.dumps(interactions),
+            "from_interactions": json.dumps(from_selectors),
+            "to_interactions": json.dumps(to_selectors)
+        }
+
+
+        # Insert the site details into the database
+        self.cursor.execute('''
+            INSERT INTO sites (name, url, price_selector, display_format, configure_from_to, general_interactions, from_interactions, to_interactions)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (site_info["name"], site_info["url"], site_info["price_selector"], site_info["display_format"], site_info["configure_from_to"], site_info["general_interactions"], site_info["from_interactions"], site_info["to_interactions"]))
+
+
+        self.conn.commit()
+
+        # Append to the saved_sites list in the main app
+        site_info = {
+            "name": site_name,
+            "url": site_url,
+            "price_selector": price_selector,
+            "display_format": display_format,
+            "configure_from_to": configure_from_to,
+            "general_interactions": interactions,
+            "from_interactions": from_selectors,
+            "to_interactions": to_selectors
+        }
+        self.saved_sites.append(site_info)
+        self.update_saved_sites_dropdown()
+
+        # Close the dialog
+        self.close()
+
+
+    def update_saved_sites_dropdown(self):
+        self.saved_sites_dropdown.clear()
+        for site in self.saved_sites:
+            self.saved_sites_dropdown.addItem(site["name"])
+
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    main_window = ScraperApp()
+    main_window.show()
+    sys.exit(app.exec_())
